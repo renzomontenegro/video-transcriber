@@ -24,10 +24,11 @@ if st.button("Transcribir", type="primary", disabled=not url):
 
         # Botón para copiar al portapapeles
         transcription_text = result["text"]
-        st.components.v1.html(f"""
+        escaped_text = transcription_text.replace("`", "\\`").replace("${", "\\${")
+        html_code = f"""
             <script>
             function copyToClipboard() {{
-                const text = `{transcription_text.replace("`", "\\`").replace("${", "\\${")}`;
+                const text = `{escaped_text}`;
                 navigator.clipboard.writeText(text).then(() => {{
                     document.getElementById('copyFeedback').style.display = 'block';
                     setTimeout(() => {{
@@ -60,6 +61,7 @@ if st.button("Transcribir", type="primary", disabled=not url):
             </style>
             <button class="copy-btn" onclick="copyToClipboard()">📋 Copiar</button>
             <span id="copyFeedback">✅ Copiado</span>
-        """, height=50)
+        """
+        st.components.v1.html(html_code, height=50)
     else:
         st.error(f"❌ {result['error']}")
