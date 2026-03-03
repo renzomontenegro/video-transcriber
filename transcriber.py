@@ -113,10 +113,22 @@ def _groq_transcribe(audio_path: str, language: str | None = None) -> str:
 
 # ── Extracción de audio desde archivo de video ────────────────────────────────
 
+def _require_ffmpeg() -> str:
+    """Retorna la ruta de ffmpeg o lanza un error claro si no está disponible."""
+    path = shutil.which("ffmpeg")
+    if path is None:
+        raise RuntimeError(
+            "ffmpeg no encontrado en PATH. "
+            "Instalalo con: scoop install ffmpeg  (o choco install ffmpeg) "
+            "y reiniciá el terminal."
+        )
+    return path
+
+
 def _extract_audio_from_video(video_path: str, out_path: str) -> None:
     """Extrae audio de un archivo de video usando ffmpeg (64kbps mono 16kHz)."""
     cmd = [
-        "ffmpeg", "-i", video_path,
+        _require_ffmpeg(), "-i", video_path,
         "-vn",                   # sin pista de video
         "-acodec", "libmp3lame",
         "-ab", "64k",            # 64kbps → ~28 MB/hora, buena calidad para voz
@@ -132,8 +144,11 @@ def _extract_audio_from_video(video_path: str, out_path: str) -> None:
 
 def _audio_duration_secs(audio_path: str) -> float | None:
     """Retorna la duración en segundos usando ffprobe."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
     cmd = [
-        "ffprobe", "-v", "quiet",
+        ffprobe, "-v", "quiet",
         "-show_entries", "format=duration",
         "-of", "csv=p=0",
         audio_path,

@@ -133,23 +133,72 @@ with tab_file:
 
 with tab_path:
     st.info(
-        "Para videos **grandes (2 GB+)**: indica la ruta en disco. "
-        "ffmpeg lee el archivo directo, sin cargarlo en memoria."
+        "Pegá una o varias rutas (una por línea, con o sin comillas). "
+        "ffmpeg lee directo desde disco — sin límite de tamaño."
     )
-    path_input = st.text_input(
-        "Ruta del archivo de video",
-        placeholder="C:/Videos/clase.mp4  ·  /home/user/pelicula.mkv",
+    path_area = st.text_area(
+        "Rutas de archivos de video",
+        placeholder=(
+            '"C:\\Videos\\video1.mp4"\n'
+            '"C:\\Videos\\video2.mp4"\n'
+            '"C:\\Videos\\video3.mp4"'
+        ),
+        height=130,
     )
-    if path_input:
-        path_input = path_input.strip().strip('"').strip("'")
-        p = __import__("pathlib").Path(path_input)
-        if p.exists():
-            size_gb = p.stat().st_size / 1_073_741_824
-            st.caption(f"✔ Encontrado · {size_gb:.2f} GB")
-        else:
-            st.warning("Archivo no encontrado. Verifica la ruta.")
-    if st.button("Transcribir ruta local", type="primary",
-                 disabled=not path_input, key="btn_path"):
-        with st.spinner("Procesando…"):
-            result = transcribe_local_path(path_input)
-        show_result(result)
+
+    # Parsear y validar cada línea
+    from pathlib import Path as _Path
+    raw_paths: list[str] = []
+    if path_area:
+        for line in path_area.splitlines():
+            clean = line.strip().strip('"').strip("'").strip()
+            if clean:
+                raw_paths.append(clean)
+
+    valid_paths: list[str] = []
+    if raw_paths:
+        for rp in raw_paths:
+            p = _Path(rp)
+            if p.exists():
+                size_gb = p.stat().st_size / 1_073_741_824
+                st.caption(f"✔ **{p.name}** · {size_gb:.2f} GB")
+                valid_paths.append(rp)
+            else:
+                st.warning(f"No encontrado: `{rp}`")
+
+    label = (f"Transcribir {len(valid_paths)} archivo{'s' if len(valid_paths) != 1 else ''}"
+             if valid_paths else "Transcribir")
+    if st.button(label, type="primary", disabled=not valid_paths, key="btn_path"):
+        all_texts: list[str] = []
+        total = len(valid_paths)
+
+        for i, path in enumerate(valid_paths):
+            filename = _Path(path).name
+            with st.spinner(f"[{i + 1}/{total}] Procesando `{filename}`…"):
+                result = transcribe_local_path(path)
+
+            with st.expander(f"📄 {filename}", expanded=True):
+                if result["success"]:
+                    st.text_area(
+                        "Transcripción",
+                        value=result["text"],
+                        height=250,
+                        key=f"ta_path_{i}",
+                    )
+                    all_texts.append(f"=== {filename} ===\n{result['text']}")
+                else:
+                    st.error(f"❌ {result['error']}")
+
+        if all_texts:
+            combined = "\n\n".join(all_texts)
+            st.divider()
+            st.caption(f"**{len(all_texts)} transcripciones completadas**")
+            col1, _ = st.columns([1, 3])
+            with col1:
+                st.download_button(
+                    "⬇️ Descargar todo (.txt)",
+                    data=combined,
+                    file_name="transcripciones.txt",
+                    mime="text/plain",
+                )
+            _copy_button(combined)
