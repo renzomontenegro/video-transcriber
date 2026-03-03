@@ -110,6 +110,126 @@ def _groq_transcribe(audio_path: str, language: str | None = None) -> str:
     return response if isinstance(response, str) else response.text
 
 
+# ── Extracción de audio desde archivo de video ────────────────────────────────
+
+def _extract_audio_from_video(video_path: str, out_path: str) -> None:
+    """Extrae audio de un archivo de video usando ffmpeg (64kbps mono 16kHz)."""
+    cmd = [
+        "ffmpeg", "-i", video_path,
+        "-vn",                   # sin pista de video
+        "-acodec", "libmp3lame",
+        "-ab", "64k",            # 64kbps → ~28 MB/hora, buena calidad para voz
+        "-ar", "16000",          # 16 kHz: suficiente para transcripción
+        "-ac", "1",              # mono
+        "-y",
+        out_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg falló al extraer audio: {result.stderr[:400]}")
+
+
+def _audio_duration_secs(audio_path: str) -> float | None:
+    """Retorna la duración en segundos usando ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        audio_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _split_audio(audio_path: str, tmp_dir: str, chunk_minutes: int = 20) -> list[str]:
+    """
+    Divide el audio en chunks de `chunk_minutes` minutos usando ffmpeg.
+    Retorna la lista de rutas de los chunks generados.
+    """
+    duration = _audio_duration_secs(audio_path)
+    if duration is None:
+        return [audio_path]  # si no podemos medir, intentamos sin dividir
+
+    chunk_secs = chunk_minutes * 60
+    chunks: list[str] = []
+    start = 0.0
+    i = 0
+
+    while start < duration:
+        chunk_path = os.path.join(tmp_dir, f"chunk_{i:03d}.mp3")
+        cmd = [
+            "ffmpeg",
+            "-ss", str(start),
+            "-t", str(chunk_secs),
+            "-i", audio_path,
+            "-c", "copy",
+            "-y",
+            chunk_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and Path(chunk_path).exists():
+            chunks.append(chunk_path)
+        start += chunk_secs
+        i += 1
+
+    return chunks if chunks else [audio_path]
+
+
+# ── Transcripción desde archivo local ────────────────────────────────────────
+
+GROQ_MAX_MB = 24  # margen de seguridad bajo el límite de 25 MB de Groq
+
+
+def transcribe_file(file_bytes: bytes, filename: str, language: str | None = None) -> dict:
+    """
+    Transcribe un archivo de video subido directamente.
+    Extrae el audio con ffmpeg y lo envía a Groq Whisper.
+    Si el audio supera 24 MB lo divide en chunks de 20 minutos.
+    """
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # Guardar el video subido
+            video_path = os.path.join(tmp, filename)
+            with open(video_path, "wb") as f:
+                f.write(file_bytes)
+
+            # Extraer audio
+            audio_path = os.path.join(tmp, "audio.mp3")
+            _extract_audio_from_video(video_path, audio_path)
+
+            size_mb = Path(audio_path).stat().st_size / (1024 * 1024)
+
+            if size_mb <= GROQ_MAX_MB:
+                text = _groq_transcribe(audio_path, language)
+            else:
+                # Dividir en chunks y transcribir cada uno
+                chunks = _split_audio(audio_path, tmp, chunk_minutes=20)
+                parts = [_groq_transcribe(chunk, language) for chunk in chunks]
+                text = " ".join(parts)
+
+        return {
+            "success": True,
+            "text": text.strip(),
+            "platform": "local",
+            "method": "groq_whisper",
+            "error": None,
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "text": None,
+            "platform": "local",
+            "method": "groq_whisper",
+            "error": str(e),
+        }
+
+
 # ── Función principal ─────────────────────────────────────────────────────────
 
 def transcribe_url(url: str, language: str | None = None) -> dict:

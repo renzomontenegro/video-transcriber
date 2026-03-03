@@ -1,0 +1,2 @@
+[server]
+maxUploadSize = 500   # MB — soporta videos de hasta ~500 MB
