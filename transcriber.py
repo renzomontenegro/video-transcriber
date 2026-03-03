@@ -1,6 +1,7 @@
 import re
 import os
 import time
+import shutil
 import tempfile
 import subprocess
 from pathlib import Path
@@ -185,49 +186,64 @@ def _split_audio(audio_path: str, tmp_dir: str, chunk_minutes: int = 20) -> list
 GROQ_MAX_MB = 24  # margen de seguridad bajo el límite de 25 MB de Groq
 
 
-def transcribe_file(file_bytes: bytes, filename: str, language: str | None = None) -> dict:
+def _transcribe_video_path(video_path: str, language: str | None = None) -> str:
+    """Extrae audio de un video en disco y lo transcribe. Hace chunking si es necesario."""
+    with tempfile.TemporaryDirectory() as tmp:
+        audio_path = os.path.join(tmp, "audio.mp3")
+        _extract_audio_from_video(video_path, audio_path)
+
+        size_mb = Path(audio_path).stat().st_size / (1024 * 1024)
+        if size_mb <= GROQ_MAX_MB:
+            return _groq_transcribe(audio_path, language)
+
+        # Audio grande → dividir en chunks de 20 min y transcribir cada uno
+        chunks = _split_audio(audio_path, tmp, chunk_minutes=20)
+        return " ".join(_groq_transcribe(c, language) for c in chunks)
+
+
+def transcribe_file(file_obj, filename: str, language: str | None = None) -> dict:
     """
-    Transcribe un archivo de video subido directamente.
-    Extrae el audio con ffmpeg y lo envía a Groq Whisper.
-    Si el audio supera 24 MB lo divide en chunks de 20 minutos.
+    Transcribe un archivo de video subido desde el navegador (UploadedFile de Streamlit).
+    Usa shutil.copyfileobj para no duplicar el buffer en memoria.
+    Límite práctico: ~500 MB (depende de la RAM disponible).
     """
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            # Guardar el video subido
             video_path = os.path.join(tmp, filename)
             with open(video_path, "wb") as f:
-                f.write(file_bytes)
+                shutil.copyfileobj(file_obj, f, length=8 * 1024 * 1024)  # 8 MB por chunk
+            text = _transcribe_video_path(video_path, language)
 
-            # Extraer audio
-            audio_path = os.path.join(tmp, "audio.mp3")
-            _extract_audio_from_video(video_path, audio_path)
-
-            size_mb = Path(audio_path).stat().st_size / (1024 * 1024)
-
-            if size_mb <= GROQ_MAX_MB:
-                text = _groq_transcribe(audio_path, language)
-            else:
-                # Dividir en chunks y transcribir cada uno
-                chunks = _split_audio(audio_path, tmp, chunk_minutes=20)
-                parts = [_groq_transcribe(chunk, language) for chunk in chunks]
-                text = " ".join(parts)
-
-        return {
-            "success": True,
-            "text": text.strip(),
-            "platform": "local",
-            "method": "groq_whisper",
-            "error": None,
-        }
+        return {"success": True, "text": text.strip(), "platform": "local",
+                "method": "groq_whisper", "error": None}
 
     except Exception as e:
-        return {
-            "success": False,
-            "text": None,
-            "platform": "local",
-            "method": "groq_whisper",
-            "error": str(e),
-        }
+        return {"success": False, "text": None, "platform": "local",
+                "method": "groq_whisper", "error": str(e)}
+
+
+def transcribe_local_path(path: str, language: str | None = None) -> dict:
+    """
+    Transcribe un video desde una ruta en disco (sin subirlo).
+    Ideal para archivos grandes (2 GB+): ffmpeg lee directo desde disco,
+    sin pasar el video por memoria.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {"success": False, "text": None, "platform": "local",
+                "method": "groq_whisper", "error": f"Archivo no encontrado: {path}"}
+    if not p.is_file():
+        return {"success": False, "text": None, "platform": "local",
+                "method": "groq_whisper", "error": f"La ruta no es un archivo: {path}"}
+
+    try:
+        text = _transcribe_video_path(str(p), language)
+        return {"success": True, "text": text.strip(), "platform": "local",
+                "method": "groq_whisper", "error": None}
+
+    except Exception as e:
+        return {"success": False, "text": None, "platform": "local",
+                "method": "groq_whisper", "error": str(e)}
 
 
 # ── Función principal ─────────────────────────────────────────────────────────

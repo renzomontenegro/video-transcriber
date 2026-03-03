@@ -1,5 +1,5 @@
 import streamlit as st
-from transcriber import transcribe_url, transcribe_file
+from transcriber import transcribe_url, transcribe_file, transcribe_local_path
 
 st.set_page_config(page_title="Video Transcriber", page_icon="🎙️", layout="centered")
 
@@ -105,7 +105,7 @@ def show_result(result: dict):
         st.error(f"❌ {result['error']}")
 
 
-tab_url, tab_file = st.tabs(["🔗 URL", "📁 Archivo local"])
+tab_url, tab_file, tab_path = st.tabs(["🔗 URL", "📁 Subir archivo", "📂 Ruta local"])
 
 with tab_url:
     url = st.text_input("Pega el link del video", placeholder="https://...")
@@ -117,7 +117,7 @@ with tab_url:
 with tab_file:
     st.info(
         "Soporta MP4, MOV, AVI, MKV, WEBM y más. "
-        "Para videos grandes el audio se divide automáticamente en fragmentos."
+        "Límite: **500 MB**. Para videos más pesados usa la pestaña **Ruta local**."
     )
     uploaded = st.file_uploader(
         "Sube tu video",
@@ -128,5 +128,27 @@ with tab_file:
         st.caption(f"Archivo: **{uploaded.name}** · {uploaded.size / 1_048_576:.1f} MB")
         if st.button("Transcribir archivo", type="primary", key="btn_file"):
             with st.spinner(f"Extrayendo y transcribiendo `{uploaded.name}`…"):
-                result = transcribe_file(uploaded.read(), uploaded.name)
+                result = transcribe_file(uploaded, uploaded.name)
             show_result(result)
+
+with tab_path:
+    st.info(
+        "Para videos **grandes (2 GB+)**: indica la ruta en disco. "
+        "ffmpeg lee el archivo directo, sin cargarlo en memoria."
+    )
+    path_input = st.text_input(
+        "Ruta del archivo de video",
+        placeholder="C:/Videos/clase.mp4  ·  /home/user/pelicula.mkv",
+    )
+    if path_input:
+        p = __import__("pathlib").Path(path_input)
+        if p.exists():
+            size_gb = p.stat().st_size / 1_073_741_824
+            st.caption(f"✔ Encontrado · {size_gb:.2f} GB")
+        else:
+            st.warning("Archivo no encontrado. Verifica la ruta.")
+    if st.button("Transcribir ruta local", type="primary",
+                 disabled=not path_input, key="btn_path"):
+        with st.spinner("Procesando…"):
+            result = transcribe_local_path(path_input)
+        show_result(result)
