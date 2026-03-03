@@ -141,6 +141,7 @@ with tab_path:
         placeholder="C:/Videos/clase.mp4  ·  /home/user/pelicula.mkv",
     )
     if path_input:
+        path_input = path_input.strip().strip('"').strip("'")
         p = __import__("pathlib").Path(path_input)
         if p.exists():
             size_gb = p.stat().st_size / 1_073_741_824
