@@ -120,16 +120,50 @@ with tab_file:
         "Límite: **500 MB**. Para videos más pesados usa la pestaña **Ruta local**."
     )
     uploaded = st.file_uploader(
-        "Sube tu video o audio",
+        "Sube tus videos o audios",
         type=["mp4", "mov", "avi", "mkv", "webm", "m4v", "flv", "wmv", "ogg"],
         help="El audio se extrae con ffmpeg y se transcribe con Groq Whisper.",
+        accept_multiple_files=True,
     )
     if uploaded:
-        st.caption(f"Archivo: **{uploaded.name}** · {uploaded.size / 1_048_576:.1f} MB")
-        if st.button("Transcribir archivo", type="primary", key="btn_file"):
-            with st.spinner(f"Extrayendo y transcribiendo `{uploaded.name}`…"):
-                result = transcribe_file(uploaded, uploaded.name)
-            show_result(result)
+        for f in uploaded:
+            st.caption(f"✔ **{f.name}** · {f.size / 1_048_576:.1f} MB")
+
+        label = (f"Transcribir {len(uploaded)} archivo{'s' if len(uploaded) != 1 else ''}")
+        if st.button(label, type="primary", key="btn_file"):
+            all_texts: list[str] = []
+            total = len(uploaded)
+
+            for i, f in enumerate(uploaded):
+                with st.spinner(f"[{i + 1}/{total}] Extrayendo y transcribiendo `{f.name}`…"):
+                    result = transcribe_file(f, f.name)
+
+                with st.expander(f"📄 {f.name}", expanded=True):
+                    if result["success"]:
+                        st.text_area(
+                            "Transcripción",
+                            value=result["text"],
+                            height=250,
+                            key=f"ta_file_{i}",
+                        )
+                        all_texts.append(f"=== {f.name} ===\n{result['text']}")
+                    else:
+                        st.error(f"❌ {result['error']}")
+
+            if all_texts:
+                combined = "\n\n".join(all_texts)
+                st.divider()
+                st.caption(f"**{len(all_texts)} transcripciones completadas**")
+                col1, _ = st.columns([1, 3])
+                with col1:
+                    st.download_button(
+                        "⬇️ Descargar todo (.txt)",
+                        data=combined,
+                        file_name="transcripciones.txt",
+                        mime="text/plain",
+                        key="dl_file_all",
+                    )
+                _copy_button(combined)
 
 with tab_path:
     st.info(
