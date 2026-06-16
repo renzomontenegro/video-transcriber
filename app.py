@@ -116,12 +116,12 @@ with tab_url:
 
 with tab_file:
     st.info(
-        "Soporta MP4, MOV, AVI, MKV, WEBM y más. "
+        "Soporta MP4, MOV, AVI, MKV, WEBM, OGG y más. "
         "Límite: **500 MB**. Para videos más pesados usa la pestaña **Ruta local**."
     )
     uploaded = st.file_uploader(
-        "Sube tu video",
-        type=["mp4", "mov", "avi", "mkv", "webm", "m4v", "flv", "wmv"],
+        "Sube tu video o audio",
+        type=["mp4", "mov", "avi", "mkv", "webm", "m4v", "flv", "wmv", "ogg"],
         help="El audio se extrae con ffmpeg y se transcribe con Groq Whisper.",
     )
     if uploaded:
