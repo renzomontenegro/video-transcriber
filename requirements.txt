@@ -1,4 +1,5 @@
 streamlit
-yt-dlp
+yt-dlp[default]
+curl_cffi
 groq
 youtube-transcript-api

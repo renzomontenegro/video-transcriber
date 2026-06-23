@@ -1,5 +1,6 @@
 import re
 import os
+import sys
 import time
 import shutil
 import tempfile
@@ -63,9 +64,23 @@ def _youtube_api(video_id: str, retries: int = 3) -> str | None:
 
 def _download_audio(url: str, out_path: str) -> str:
     """Descarga solo el audio del video. Retorna la ruta del archivo."""
-    cmd = [
-        "yt-dlp",
-        "-f", "bestaudio[ext=m4a]/bestaudio/best",
+    is_tiktok = "tiktok.com" in url
+
+    if is_tiktok:
+        # TikTok no expone formatos de solo-audio y sus variantes h265 (bytevc1)
+        # bajan SIN pista de audio → forzamos h264, que siempre trae aac.
+        fmt = "best[vcodec^=h264][acodec!=none]/best"
+    else:
+        # YouTube/Twitter/Instagram: el stream de solo-audio es lo más liviano.
+        fmt = "bestaudio[ext=m4a]/bestaudio/best"
+
+    # Invocamos yt-dlp como módulo del Python actual (no el ejecutable del PATH,
+    # que puede ser una instalación vieja sin soporte de --impersonate).
+    cmd = [sys.executable, "-m", "yt_dlp", "-f", fmt]
+    if is_tiktok:
+        # TikTok exige TLS impersonation (requiere curl_cffi instalado).
+        cmd += ["--impersonate", "chrome"]
+    cmd += [
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", "5",          # balance calidad/tamaño
@@ -73,7 +88,21 @@ def _download_audio(url: str, out_path: str) -> str:
         "-o", out_path,
         url,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    # El challenge JS de TikTok falla con "universal data for rehydration"
+    # cuando rate-limitea por requests muy seguidos. No es error de red, así que
+    # --extractor-retries no lo cubre: reintentamos el proceso con backoff
+    # creciente (los reintentos rápidos empeoran el bloqueo).
+    attempts = 4 if is_tiktok else 1
+    result = None
+    for attempt in range(attempts):
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            break
+        if attempt < attempts - 1 and "rehydration" in (result.stderr or ""):
+            time.sleep(15 * (attempt + 1))   # 15s, 30s, 45s
+            continue
+        break
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp falló: {result.stderr[:300]}")
 
