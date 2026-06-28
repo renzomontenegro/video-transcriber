@@ -60,11 +60,137 @@ def _youtube_api(video_id: str, retries: int = 3) -> str | None:
     return None
 
 
+# ── Cookies para yt-dlp ───────────────────────────────────────────────────────
+
+def _read_secret(name: str) -> str | None:
+    """Lee una config desde variable de entorno o st.secrets (en ese orden)."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    try:
+        import streamlit as st
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
+
+def _cookie_args(work_dir: str) -> list[str]:
+    """
+    Arma los argumentos de cookies para yt-dlp según el entorno.
+
+    Prioridad:
+    1. YTDLP_COOKIES_FILE (secret o env): ruta a un cookies.txt ya exportado
+       (formato Netscape). Es la opción más confiable en LOCAL Windows, porque
+       Chrome/Edge nuevos usan App-Bound Encryption y --cookies-from-browser falla.
+    2. YTDLP_COOKIES / IG_COOKIES (secret o env): contenido de un cookies.txt en
+       formato Netscape. Se vuelca a un archivo temporal y se pasa con --cookies.
+       Es la opción para DEPLOY en servidor (Streamlit Cloud), donde no hay browser.
+    3. YTDLP_COOKIES_FROM_BROWSER (secret o env): nombre del navegador
+       (chrome/edge/firefox/brave). yt-dlp lee las cookies del browser logueado;
+       puede fallar en Windows reciente (ver punto 1).
+
+    Retorna [] si no hay nada configurado.
+    """
+    cookie_path = _read_secret("YTDLP_COOKIES_FILE")
+    if cookie_path and Path(cookie_path).is_file():
+        return ["--cookies", cookie_path]
+
+    raw = _read_secret("YTDLP_COOKIES") or _read_secret("IG_COOKIES")
+    if raw:
+        cookie_file = os.path.join(work_dir, "cookies.txt")
+        with open(cookie_file, "w", encoding="utf-8") as f:
+            f.write(raw)
+        return ["--cookies", cookie_file]
+
+    browser = _read_secret("YTDLP_COOKIES_FROM_BROWSER")
+    if browser:
+        return ["--cookies-from-browser", browser.strip()]
+
+    return []
+
+
+# ── Instagram: descarga directa sin login ─────────────────────────────────────
+#
+# Instagram bloquea su API para usuarios sin sesión, pero el reproductor sigue
+# cargando el video por detrás del modal de login. La página de "embed captioned"
+# expone la URL firmada del mp4 en su HTML (dentro de un JSON doble-escapado),
+# accesible sin cookies. Replicamos eso: bajamos el embed con impersonation de
+# Chrome, extraemos el mp4 y sacamos el audio con ffmpeg. Es más robusto que las
+# cookies (que caducan y sufren rate-limit), así que lo intentamos PRIMERO.
+
+def _instagram_media_url(shortcode: str) -> str | None:
+    """Devuelve la URL directa del mp4 de un reel/post IG, o None si no la halla."""
+    from curl_cffi import requests as cffi
+
+    # /reel/ y /p/ comparten el mismo embed; probamos ambos por las dudas.
+    embeds = [
+        f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
+        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
+    ]
+    for embed in embeds:
+        try:
+            r = cffi.get(embed, impersonate="chrome", timeout=20)
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        html = r.text
+        for m in re.finditer(r"\.mp4", html):
+            start = html.rfind("https", max(0, m.start() - 1500), m.start())
+            if start == -1:
+                continue
+            mm = re.match(r'(https.*?)\\?"', html[start:start + 1600])
+            if not mm:
+                continue
+            # El JSON viene doble-escapado: \\/ → /  y  \\u0026 → &
+            u = re.sub(r"\\+u0026", "&", mm.group(1))
+            u = re.sub(r"\\+", "", u)
+            if u.startswith("http"):
+                return u
+    return None
+
+
+def _download_instagram_audio(url: str, out_path: str) -> str | None:
+    """Baja el reel vía embed (sin login) y devuelve el mp3. None si no se pudo."""
+    _, shortcode = detect_platform(url)
+    media_url = _instagram_media_url(shortcode)
+    if not media_url:
+        return None
+
+    from curl_cffi import requests as cffi
+    try:
+        resp = cffi.get(media_url, impersonate="chrome", timeout=120)
+    except Exception:
+        return None
+    if resp.status_code != 200 or "video" not in (resp.headers.get("content-type") or ""):
+        return None
+
+    video_path = str(Path(out_path).with_suffix(".ig.mp4"))
+    with open(video_path, "wb") as f:
+        f.write(resp.content)
+
+    # Reutilizamos el extractor de audio (mp3 64k mono 16k, ideal para Whisper).
+    audio_path = str(Path(out_path).with_suffix(".mp3"))
+    _extract_audio_from_video(video_path, audio_path)
+    return audio_path
+
+
 # ── Descarga con yt-dlp ───────────────────────────────────────────────────────
 
 def _download_audio(url: str, out_path: str) -> str:
     """Descarga solo el audio del video. Retorna la ruta del archivo."""
     is_tiktok = "tiktok.com" in url
+    is_instagram = "instagram.com" in url
+
+    # Instagram: probamos primero el bypass directo (sin login). Si falla,
+    # caemos a yt-dlp con cookies (ver _cookie_args).
+    if is_instagram:
+        try:
+            direct = _download_instagram_audio(url, out_path)
+            if direct:
+                return direct
+        except Exception:
+            pass  # cualquier problema → fallback a yt-dlp
 
     if is_tiktok:
         # TikTok no expone formatos de solo-audio y sus variantes h265 (bytevc1)
@@ -77,9 +203,17 @@ def _download_audio(url: str, out_path: str) -> str:
     # Invocamos yt-dlp como módulo del Python actual (no el ejecutable del PATH,
     # que puede ser una instalación vieja sin soporte de --impersonate).
     cmd = [sys.executable, "-m", "yt_dlp", "-f", fmt]
-    if is_tiktok:
-        # TikTok exige TLS impersonation (requiere curl_cffi instalado).
+    if is_tiktok or is_instagram:
+        # TikTok exige TLS impersonation; en Instagram ayuda a no parecer un bot
+        # (requiere curl_cffi instalado, ya está en requirements).
         cmd += ["--impersonate", "chrome"]
+
+    # Instagram bloquea casi todos los reels para usuarios sin login: yt-dlp
+    # responde "empty media response". Las cookies de una sesión logueada lo
+    # resuelven (ver _cookie_args). Sin cookies, abajo damos un error claro.
+    cookie_args = _cookie_args(str(Path(out_path).parent))
+    cmd += cookie_args
+
     cmd += [
         "--extract-audio",
         "--audio-format", "mp3",
@@ -104,7 +238,18 @@ def _download_audio(url: str, out_path: str) -> str:
             continue
         break
     if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp falló: {result.stderr[:300]}")
+        stderr = result.stderr or ""
+        # Caso típico de Instagram sin sesión: damos una instrucción accionable
+        # en vez del traceback crudo de yt-dlp.
+        if is_instagram and ("empty media response" in stderr or "login" in stderr.lower()) \
+                and not cookie_args:
+            raise RuntimeError(
+                "Instagram requiere sesión iniciada para este reel. "
+                "Exportá un cookies.txt de instagram.com (extensión 'Get cookies.txt LOCALLY') "
+                "y seteá YTDLP_COOKIES_FILE con su ruta (local), o pegá su contenido en el "
+                "secret YTDLP_COOKIES (deploy). Ver README."
+            )
+        raise RuntimeError(f"yt-dlp falló: {stderr[:300]}")
 
     # yt-dlp puede cambiar la extensión
     path = Path(out_path)
