@@ -60,55 +60,6 @@ def _youtube_api(video_id: str, retries: int = 3) -> str | None:
     return None
 
 
-# ── Cookies para yt-dlp ───────────────────────────────────────────────────────
-
-def _read_secret(name: str) -> str | None:
-    """Lee una config desde variable de entorno o st.secrets (en ese orden)."""
-    val = os.environ.get(name)
-    if val:
-        return val
-    try:
-        import streamlit as st
-        return st.secrets.get(name)
-    except Exception:
-        return None
-
-
-def _cookie_args(work_dir: str) -> list[str]:
-    """
-    Arma los argumentos de cookies para yt-dlp según el entorno.
-
-    Prioridad:
-    1. YTDLP_COOKIES_FILE (secret o env): ruta a un cookies.txt ya exportado
-       (formato Netscape). Es la opción más confiable en LOCAL Windows, porque
-       Chrome/Edge nuevos usan App-Bound Encryption y --cookies-from-browser falla.
-    2. YTDLP_COOKIES / IG_COOKIES (secret o env): contenido de un cookies.txt en
-       formato Netscape. Se vuelca a un archivo temporal y se pasa con --cookies.
-       Es la opción para DEPLOY en servidor (Streamlit Cloud), donde no hay browser.
-    3. YTDLP_COOKIES_FROM_BROWSER (secret o env): nombre del navegador
-       (chrome/edge/firefox/brave). yt-dlp lee las cookies del browser logueado;
-       puede fallar en Windows reciente (ver punto 1).
-
-    Retorna [] si no hay nada configurado.
-    """
-    cookie_path = _read_secret("YTDLP_COOKIES_FILE")
-    if cookie_path and Path(cookie_path).is_file():
-        return ["--cookies", cookie_path]
-
-    raw = _read_secret("YTDLP_COOKIES") or _read_secret("IG_COOKIES")
-    if raw:
-        cookie_file = os.path.join(work_dir, "cookies.txt")
-        with open(cookie_file, "w", encoding="utf-8") as f:
-            f.write(raw)
-        return ["--cookies", cookie_file]
-
-    browser = _read_secret("YTDLP_COOKIES_FROM_BROWSER")
-    if browser:
-        return ["--cookies-from-browser", browser.strip()]
-
-    return []
-
-
 # ── Instagram: descarga directa sin login ─────────────────────────────────────
 #
 # Instagram bloquea su API para usuarios sin sesión, pero el reproductor sigue
@@ -183,7 +134,7 @@ def _download_audio(url: str, out_path: str) -> str:
     is_instagram = "instagram.com" in url
 
     # Instagram: probamos primero el bypass directo (sin login). Si falla,
-    # caemos a yt-dlp con cookies (ver _cookie_args).
+    # caemos a yt-dlp (último recurso, sin cookies).
     if is_instagram:
         try:
             direct = _download_instagram_audio(url, out_path)
@@ -207,12 +158,6 @@ def _download_audio(url: str, out_path: str) -> str:
         # TikTok exige TLS impersonation; en Instagram ayuda a no parecer un bot
         # (requiere curl_cffi instalado, ya está en requirements).
         cmd += ["--impersonate", "chrome"]
-
-    # Instagram bloquea casi todos los reels para usuarios sin login: yt-dlp
-    # responde "empty media response". Las cookies de una sesión logueada lo
-    # resuelven (ver _cookie_args). Sin cookies, abajo damos un error claro.
-    cookie_args = _cookie_args(str(Path(out_path).parent))
-    cmd += cookie_args
 
     cmd += [
         "--extract-audio",
@@ -239,15 +184,12 @@ def _download_audio(url: str, out_path: str) -> str:
         break
     if result.returncode != 0:
         stderr = result.stderr or ""
-        # Caso típico de Instagram sin sesión: damos una instrucción accionable
-        # en vez del traceback crudo de yt-dlp.
-        if is_instagram and ("empty media response" in stderr or "login" in stderr.lower()) \
-                and not cookie_args:
+        if is_instagram:
+            # El bypass por embed ya corrió antes; si llegamos acá no se pudo
+            # obtener el video por ninguna vía. Mensaje claro, sin pedir cookies.
             raise RuntimeError(
-                "Instagram requiere sesión iniciada para este reel. "
-                "Exportá un cookies.txt de instagram.com (extensión 'Get cookies.txt LOCALLY') "
-                "y seteá YTDLP_COOKIES_FILE con su ruta (local), o pegá su contenido en el "
-                "secret YTDLP_COOKIES (deploy). Ver README."
+                "No se pudo descargar el reel de Instagram. Puede ser privado, "
+                "haber sido eliminado, o Instagram cambió la estructura del embed."
             )
         raise RuntimeError(f"yt-dlp falló: {stderr[:300]}")
 
