@@ -101,26 +101,43 @@ def _instagram_media_url(shortcode: str) -> str | None:
     return None
 
 
-def _download_instagram_audio(url: str, out_path: str) -> str | None:
-    """Baja el reel vía embed (sin login) y devuelve el mp3. None si no se pudo."""
+def _download_instagram_audio(url: str, out_path: str) -> str:
+    """
+    Baja el reel vía embed (sin login) y devuelve la ruta del archivo a transcribir.
+
+    Lanza RuntimeError con la causa concreta si algo falla (así el error es visible
+    en prod en vez de quedar oculto). Para reels chicos devuelve el mp4 tal cual:
+    Groq Whisper acepta mp4, así evitamos depender de ffmpeg. Solo si el video
+    supera el límite de Groq extraemos el audio (ahí sí hace falta ffmpeg).
+    """
+    try:
+        from curl_cffi import requests as cffi
+    except Exception as e:
+        raise RuntimeError(f"curl_cffi no disponible en el entorno: {e}")
+
     _, shortcode = detect_platform(url)
     media_url = _instagram_media_url(shortcode)
     if not media_url:
-        return None
+        raise RuntimeError("Instagram: no se encontró la URL del video en el embed")
 
-    from curl_cffi import requests as cffi
     try:
         resp = cffi.get(media_url, impersonate="chrome", timeout=120)
-    except Exception:
-        return None
-    if resp.status_code != 200 or "video" not in (resp.headers.get("content-type") or ""):
-        return None
+    except Exception as e:
+        raise RuntimeError(f"Instagram: falló la descarga del mp4: {e}")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Instagram: la descarga del mp4 devolvió HTTP {resp.status_code}")
+    if "video" not in (resp.headers.get("content-type") or ""):
+        raise RuntimeError("Instagram: la respuesta del CDN no es un video")
 
     video_path = str(Path(out_path).with_suffix(".ig.mp4"))
     with open(video_path, "wb") as f:
         f.write(resp.content)
 
-    # Reutilizamos el extractor de audio (mp3 64k mono 16k, ideal para Whisper).
+    # mp4 chico → directo a Groq (sin ffmpeg). Grande → extraer audio mp3.
+    size_mb = len(resp.content) / (1024 * 1024)
+    if size_mb <= GROQ_MAX_MB:
+        return video_path
+
     audio_path = str(Path(out_path).with_suffix(".mp3"))
     _extract_audio_from_video(video_path, audio_path)
     return audio_path
@@ -133,15 +150,11 @@ def _download_audio(url: str, out_path: str) -> str:
     is_tiktok = "tiktok.com" in url
     is_instagram = "instagram.com" in url
 
-    # Instagram: probamos primero el bypass directo (sin login). Si falla,
-    # caemos a yt-dlp (último recurso, sin cookies).
+    # Instagram: único método es el bypass por embed (sin login). yt-dlp sin
+    # cookies no puede con Instagram, así que no tiene sentido como fallback:
+    # dejamos que el error concreto se propague para verlo en prod.
     if is_instagram:
-        try:
-            direct = _download_instagram_audio(url, out_path)
-            if direct:
-                return direct
-        except Exception:
-            pass  # cualquier problema → fallback a yt-dlp
+        return _download_instagram_audio(url, out_path)
 
     if is_tiktok:
         # TikTok no expone formatos de solo-audio y sus variantes h265 (bytevc1)
@@ -183,15 +196,7 @@ def _download_audio(url: str, out_path: str) -> str:
             continue
         break
     if result.returncode != 0:
-        stderr = result.stderr or ""
-        if is_instagram:
-            # El bypass por embed ya corrió antes; si llegamos acá no se pudo
-            # obtener el video por ninguna vía. Mensaje claro, sin pedir cookies.
-            raise RuntimeError(
-                "No se pudo descargar el reel de Instagram. Puede ser privado, "
-                "haber sido eliminado, o Instagram cambió la estructura del embed."
-            )
-        raise RuntimeError(f"yt-dlp falló: {stderr[:300]}")
+        raise RuntimeError(f"yt-dlp falló: {(result.stderr or '')[:300]}")
 
     # yt-dlp puede cambiar la extensión
     path = Path(out_path)
